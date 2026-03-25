@@ -94,6 +94,7 @@ export default function App() {
   
   const [decryptedChain, setDecryptedChain] = useState([]);
   const fileInputRef = useRef(null);
+  const decryptCache = useRef({});
 
   // 보안 로직 상태
   const [failedAttempts, setFailedAttempts] = useState(0);
@@ -113,9 +114,14 @@ export default function App() {
           if (db) {
             try {
               const docRef = doc(db, 'artifacts', appId, 'users', u.uid, 'vault_data', 'chain_doc');
-              const snapshot = await getDoc(docRef);
+              const snapshot = await Promise.race([
+                getDoc(docRef),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+              ]);
               if (snapshot.exists()) exists = true;
-            } catch (e) {}
+            } catch (e) {
+              console.warn("Cloud check timed out or failed, falling back to local check.");
+            }
           }
           if (!exists) {
             if (sessionStorage.getItem(`my_blockchain_db_v4_${u.uid}`)) exists = true;
@@ -189,6 +195,7 @@ export default function App() {
     setCryptoKey(null);
     setInputKey('');
     setHasExistingChain(false);
+    decryptCache.current = {};
     
     setStatusMsg('✅ 모든 데이터가 초기화되었습니다.');
     setTimeout(() => setStatusMsg(''), 3000);
@@ -205,15 +212,26 @@ export default function App() {
 
   // [보안 복호화] 체인이 갱신될 때마다 화면용 데이터 복호화
   useEffect(() => {
+    decryptCache.current = {};
+  }, [cryptoKey]);
+
+  useEffect(() => {
     const decryptEntireChain = async () => {
       if (!isUnlocked || chain.length === 0 || !cryptoKey) return;
       const decrypted = await Promise.all(chain.map(async (block) => {
         if (block.index === 0) return { ...block, parsedData: null };
+        
+        if (decryptCache.current[block.hash]) {
+          return { ...block, parsedData: decryptCache.current[block.hash] };
+        }
+
         const dec = await decryptData(block.data, cryptoKey);
         let parsedData = null;
         if (dec) {
           try { parsedData = JSON.parse(dec); } catch (e) {}
         }
+        
+        decryptCache.current[block.hash] = parsedData;
         return { ...block, parsedData };
       }));
       setDecryptedChain(decrypted);
@@ -302,11 +320,13 @@ export default function App() {
     }
   };
 
-  const createGenesisBlock = async () => {
+  const createGenesisBlock = async (keyMaterial) => {
     const timestamp = Date.now();
-    const data = "Genesis Block - 체인의 시작";
-    const hash = await generateHash(0, "0", timestamp, data);
-    await updateChainAndCloud([{ index: 0, timestamp, data, prevHash: "0", hash }]);
+    const rawData = "Genesis Block - 체인의 시작";
+    const encryptedData = await encryptData(rawData, keyMaterial);
+    const hash = await generateHash(0, "0", timestamp, encryptedData);
+    const newChain = [{ index: 0, timestamp, data: encryptedData, prevHash: "0", hash }];
+    await updateChainAndCloud(newChain);
   };
 
   const handleUnlock = async () => {
@@ -364,9 +384,26 @@ export default function App() {
     }
 
     // 키 검증 로직 (데이터가 있을 경우)
-    if (loadedChain && loadedChain.length > 1) {
-      // 두 번째 블록(첫 번째 실제 데이터) 복호화 시도
-      const testDecrypt = await decryptData(loadedChain[1].data, keyMaterial);
+    let needsGenesisUpgrade = false;
+
+    if (loadedChain && loadedChain.length > 0) {
+      let testDecrypt = null;
+      
+      if (loadedChain.length === 1) {
+        if (loadedChain[0].data === "Genesis Block - 체인의 시작") {
+          // 구버전 빈 금고 (평문 제네시스 블록)
+          testDecrypt = true; // 무조건 통과 (데이터가 없으므로 현재 입력한 키를 마스터 키로 확정)
+          needsGenesisUpgrade = true;
+        } else {
+          // 신버전 빈 금고 (암호화된 제네시스 블록)
+          const dec = await decryptData(loadedChain[0].data, keyMaterial);
+          testDecrypt = dec === "Genesis Block - 체인의 시작";
+        }
+      } else {
+        // 데이터 블록이 있는 경우 (두 번째 블록으로 검증)
+        testDecrypt = await decryptData(loadedChain[1].data, keyMaterial);
+      }
+
       if (!testDecrypt) {
         const newFails = failedAttempts + 1;
         setFailedAttempts(newFails);
@@ -388,25 +425,36 @@ export default function App() {
     setIsUnlocked(true);
 
     if (loadedChain) {
-      setChain(loadedChain);
-      const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
-      sessionStorage.setItem(storageKey, JSON.stringify(loadedChain));
-      
-      if (migratedFromLocal) {
-        sessionStorage.removeItem('my_blockchain_db_v4_local');
-      }
-
-      if (user && db && !isCloud) {
-        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'vault_data', 'chain_doc');
-        await setDoc(docRef, { chain: loadedChain });
-        setStatusMsg('☁️ 기존 로컬 데이터를 클라우드에 백업했습니다!');
-      } else if (isCloud) {
-        setStatusMsg('☁️ 클라우드 동기화 완료!');
+      if (needsGenesisUpgrade) {
+        // 구버전 빈 금고를 신버전(암호화된 제네시스 블록)으로 업그레이드
+        const timestamp = Date.now();
+        const rawData = "Genesis Block - 체인의 시작";
+        const encryptedData = await encryptData(rawData, keyMaterial);
+        const hash = await generateHash(0, "0", timestamp, encryptedData);
+        const upgradedChain = [{ index: 0, timestamp, data: encryptedData, prevHash: "0", hash }];
+        await updateChainAndCloud(upgradedChain);
+        setStatusMsg('보안이 강화된 새로운 제네시스 블록으로 업그레이드되었습니다.');
       } else {
-        setStatusMsg('로컬 오프라인 모드로 실행됩니다.');
+        setChain(loadedChain);
+        const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
+        sessionStorage.setItem(storageKey, JSON.stringify(loadedChain));
+        
+        if (migratedFromLocal) {
+          sessionStorage.removeItem('my_blockchain_db_v4_local');
+        }
+
+        if (user && db && !isCloud) {
+          const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'vault_data', 'chain_doc');
+          await setDoc(docRef, { chain: loadedChain, updatedAt: Date.now() });
+          setStatusMsg('☁️ 기존 로컬 데이터를 클라우드에 백업했습니다!');
+        } else if (isCloud) {
+          setStatusMsg('☁️ 클라우드 동기화 완료!');
+        } else {
+          setStatusMsg('로컬 오프라인 모드로 실행됩니다.');
+        }
       }
     } else {
-      await createGenesisBlock();
+      await createGenesisBlock(keyMaterial);
       setStatusMsg(user && db ? '☁️ 새로운 클라우드 금고가 생성되었습니다!' : '로컬 오프라인 모드로 실행됩니다.');
     }
     setTimeout(() => setStatusMsg(''), 3000);
