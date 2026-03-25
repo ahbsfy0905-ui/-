@@ -1,0 +1,33 @@
+{
+  "entities": {
+    "VaultChain": {
+      "title": "VaultChain",
+      "description": "The blockchain containing the user's encrypted passwords",
+      "type": "object",
+      "properties": {
+        "chain": {
+          "type": "array",
+          "description": "Array of blockchain blocks",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": { "type": "number" },
+              "timestamp": { "type": "number" },
+              "data": { "type": "string" },
+              "prevHash": { "type": "string" },
+              "hash": { "type": "string" }
+            },
+            "required": ["index", "timestamp", "data", "prevHash", "hash"]
+          }
+        }
+      },
+      "required": ["chain"]
+    }
+  },
+  "firestore": {
+    "/artifacts/{appId}/users/{userId}/vault_data/chain_doc": {
+      "schema": { "$ref": "#/entities/VaultChain" },
+      "description": "The user's encrypted password vault blockchain"
+    }
+  }
+}

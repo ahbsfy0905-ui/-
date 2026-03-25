@@ -1,0 +1,65 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: artifacts/{appId}/users/{userId}/vault_data
+    // Document ID: chain_doc
+    // Fields:
+    //   - chain: list (required) - Array of blockchain blocks
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidBlock(block) {
+      return block is map &&
+             block.keys().hasAll(['index', 'timestamp', 'data', 'prevHash', 'hash']) &&
+             block.index is number &&
+             block.timestamp is number &&
+             block.data is string &&
+             block.prevHash is string &&
+             block.hash is string;
+    }
+
+    function isValidChain(chain) {
+      return chain is list && chain.size() <= 10000; // reasonable limit
+    }
+
+    function isValidVaultData() {
+      return hasOnlyAllowedFields(['chain']) &&
+             hasRequiredFields(['chain']) &&
+             isValidChain(request.resource.data.chain);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    match /artifacts/{appId}/users/{userId}/vault_data/chain_doc {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidVaultData();
+      allow update: if isOwner(userId) && isValidVaultData();
+      allow delete: if isOwner(userId);
+    }
+  }
+}
