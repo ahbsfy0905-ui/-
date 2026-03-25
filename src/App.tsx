@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from 'firebase/auth';
-import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
+import { doc, setDoc, getDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
 import { ShieldCheck, Cloud, Upload, Download, Lock, Plus, Search, Copy, Trash2, Edit2, History, CheckCircle2, AlertCircle, RefreshCw, Eye, EyeOff, Clock, LogOut } from 'lucide-react';
 import { auth, db } from './firebase';
 
@@ -156,6 +156,41 @@ export default function App() {
     if (auth) {
       await signOut(auth);
     }
+  };
+
+  const handleReset = async () => {
+    if (!window.confirm("⚠️ 모든 데이터(클라우드 및 로컬)가 영구적으로 삭제됩니다. 계속하시겠습니까?")) return;
+    
+    setStatusMsg('데이터 초기화 중...');
+    
+    // 1. Firestore 삭제
+    if (user && db) {
+      try {
+        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'vault_data', 'chain_doc');
+        await deleteDoc(docRef);
+      } catch (err) {
+        console.error("Firestore delete failed", err);
+      }
+    }
+    
+    // 2. LocalStorage 삭제
+    const keys = [
+      'my_blockchain_db_v4',
+      'my_blockchain_db_v4_local',
+      user ? `my_blockchain_db_v4_${user.uid}` : null
+    ].filter(Boolean);
+    
+    keys.forEach(k => localStorage.removeItem(k));
+    
+    // 3. 상태 초기화
+    setChain([]);
+    setDecryptedChain([]);
+    setIsUnlocked(false);
+    setMasterKey('');
+    setHasExistingChain(false);
+    
+    setStatusMsg('✅ 모든 데이터가 초기화되었습니다.');
+    setTimeout(() => setStatusMsg(''), 3000);
   };
 
   // [로컬 확인] 초기 진입 시 기존 데이터 마이그레이션
@@ -643,6 +678,16 @@ export default function App() {
             >
               {isAuthReady ? (lockoutUntil > 0 ? '보안 잠금 작동 중' : '잠금 해제') : '보안 환경 준비 중...'}
             </button>
+
+            <div className="pt-4 border-t border-slate-100 mt-4 space-y-3">
+              <button 
+                onClick={handleReset}
+                className="w-full flex items-center justify-center gap-2 text-rose-500 hover:text-rose-600 text-xs font-medium py-2 transition-colors"
+              >
+                <Trash2 size={14} />
+                모든 데이터 초기화 (테스트용)
+              </button>
+            </div>
           </div>
 
           <div className="pt-6 mt-6 border-t border-slate-100">
@@ -717,8 +762,11 @@ export default function App() {
             <button onClick={() => setIsUnlocked(false)} className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2 shadow-sm">
               <Lock size={16} /> 잠금
             </button>
-            <button onClick={handleLogout} className="p-2.5 text-rose-600 hover:bg-rose-50 rounded-xl transition-colors border border-rose-100 ml-1" title="로그아웃">
+            <button onClick={handleLogout} className="p-2.5 text-slate-600 hover:bg-slate-50 rounded-xl transition-colors border border-slate-200 ml-1" title="로그아웃">
               <LogOut size={18} />
+            </button>
+            <button onClick={handleReset} className="p-2.5 text-rose-600 hover:bg-rose-50 rounded-xl transition-colors border border-rose-100 ml-1" title="모든 데이터 초기화">
+              <Trash2 size={18} />
             </button>
           </div>
         </div>
