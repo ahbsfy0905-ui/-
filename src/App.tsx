@@ -15,19 +15,17 @@ async function generateHash(index, prevHash, timestamp, data) {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-const getAESKey = async (password, salt) => {
-  const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), {name: "PBKDF2"}, false, ["deriveKey"]);
+const deriveAESKey = async (keyMaterial, salt) => {
   return crypto.subtle.deriveKey(
     {name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256"},
     keyMaterial, {name: "AES-GCM", length: 256}, false, ["encrypt", "decrypt"]
   );
 };
 
-const encryptData = async (text, password) => {
+const encryptData = async (text, keyMaterial) => {
   try {
     const salt = crypto.getRandomValues(new Uint8Array(16));
-    const key = await getAESKey(password, salt);
+    const key = await deriveAESKey(keyMaterial, salt);
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const enc = new TextEncoder();
     const encrypted = await crypto.subtle.encrypt({name: "AES-GCM", iv: iv}, key, enc.encode(text));
@@ -45,7 +43,7 @@ const encryptData = async (text, password) => {
   } catch (e) { return ""; }
 };
 
-const decryptData = async (base64, password) => {
+const decryptData = async (base64, keyMaterial) => {
   try {
     const str = atob(base64);
     const combined = new Uint8Array(str.length);
@@ -55,7 +53,7 @@ const decryptData = async (base64, password) => {
     const iv = combined.slice(16, 28);
     const data = combined.slice(28);
 
-    const key = await getAESKey(password, salt);
+    const key = await deriveAESKey(keyMaterial, salt);
     const decrypted = await crypto.subtle.decrypt({name: "AES-GCM", iv: iv}, key, data);
 
     return new TextDecoder().decode(decrypted);
@@ -69,7 +67,8 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
 
-  const [masterKey, setMasterKey] = useState('');
+  const [cryptoKey, setCryptoKey] = useState(null);
+  const [inputKey, setInputKey] = useState('');
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [chain, setChain] = useState([]);
   const [hasExistingChain, setHasExistingChain] = useState(false);
@@ -119,8 +118,8 @@ export default function App() {
             } catch (e) {}
           }
           if (!exists) {
-            if (localStorage.getItem(`my_blockchain_db_v4_${u.uid}`)) exists = true;
-            else if (localStorage.getItem('my_blockchain_db_v4_local')) exists = true;
+            if (sessionStorage.getItem(`my_blockchain_db_v4_${u.uid}`)) exists = true;
+            else if (sessionStorage.getItem('my_blockchain_db_v4_local')) exists = true;
           }
           setHasExistingChain(exists);
           setIsAuthReady(true);
@@ -128,9 +127,10 @@ export default function App() {
         checkData();
       } else {
         setIsUnlocked(false);
-        setMasterKey('');
+        setCryptoKey(null);
+        setInputKey('');
         setChain([]);
-        setHasExistingChain(!!localStorage.getItem('my_blockchain_db_v4_local'));
+        setHasExistingChain(!!sessionStorage.getItem('my_blockchain_db_v4_local'));
         setIsAuthReady(true);
       }
     });
@@ -180,13 +180,14 @@ export default function App() {
       user ? `my_blockchain_db_v4_${user.uid}` : null
     ].filter(Boolean);
     
-    keys.forEach(k => localStorage.removeItem(k));
+    keys.forEach(k => sessionStorage.removeItem(k));
     
     // 3. 상태 초기화
     setChain([]);
     setDecryptedChain([]);
     setIsUnlocked(false);
-    setMasterKey('');
+    setCryptoKey(null);
+    setInputKey('');
     setHasExistingChain(false);
     
     setStatusMsg('✅ 모든 데이터가 초기화되었습니다.');
@@ -195,20 +196,20 @@ export default function App() {
 
   // [로컬 확인] 초기 진입 시 기존 데이터 마이그레이션
   useEffect(() => {
-    const oldData = localStorage.getItem('my_blockchain_db_v4');
+    const oldData = sessionStorage.getItem('my_blockchain_db_v4');
     if (oldData) {
-      localStorage.setItem('my_blockchain_db_v4_local', oldData);
-      localStorage.removeItem('my_blockchain_db_v4');
+      sessionStorage.setItem('my_blockchain_db_v4_local', oldData);
+      sessionStorage.removeItem('my_blockchain_db_v4');
     }
   }, []);
 
   // [보안 복호화] 체인이 갱신될 때마다 화면용 데이터 복호화
   useEffect(() => {
     const decryptEntireChain = async () => {
-      if (!isUnlocked || chain.length === 0) return;
+      if (!isUnlocked || chain.length === 0 || !cryptoKey) return;
       const decrypted = await Promise.all(chain.map(async (block) => {
         if (block.index === 0) return { ...block, parsedData: null };
-        const dec = await decryptData(block.data, masterKey);
+        const dec = await decryptData(block.data, cryptoKey);
         let parsedData = null;
         if (dec) {
           try { parsedData = JSON.parse(dec); } catch (e) {}
@@ -218,7 +219,7 @@ export default function App() {
       setDecryptedChain(decrypted);
     };
     decryptEntireChain();
-  }, [chain, isUnlocked, masterKey]);
+  }, [chain, isUnlocked, cryptoKey]);
 
   // [클라우드 동기화] 실시간 수신 리스너
   useEffect(() => {
@@ -231,7 +232,7 @@ export default function App() {
            if (JSON.stringify(chain) !== JSON.stringify(cloudChain)) {
                setChain(cloudChain);
                const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
-               localStorage.setItem(storageKey, JSON.stringify(cloudChain));
+               sessionStorage.setItem(storageKey, JSON.stringify(cloudChain));
            }
        }
     }, (err) => console.error("Cloud Sync Error:", err));
@@ -247,7 +248,8 @@ export default function App() {
       if (isUnlocked) {
         timeout = setTimeout(() => {
           setIsUnlocked(false);
-          setMasterKey('');
+          setCryptoKey(null);
+          setInputKey('');
           setLoginError('보안을 위해 3분간 조작이 없어 자동 잠금되었습니다.');
         }, 3 * 60 * 1000);
       }
@@ -288,7 +290,7 @@ export default function App() {
   const updateChainAndCloud = async (newChain) => {
     setChain(newChain);
     const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
-    localStorage.setItem(storageKey, JSON.stringify(newChain));
+    sessionStorage.setItem(storageKey, JSON.stringify(newChain));
     
     if (user && db) {
       try {
@@ -312,7 +314,7 @@ export default function App() {
       setLoginError("클라우드 통신을 준비 중입니다. 잠시만 기다려주세요...");
       return;
     }
-    if (masterKey.length < 4) {
+    if (inputKey.length < 4) {
       setLoginError("마스터 키는 최소 4자리 이상이어야 합니다.");
       return;
     }
@@ -323,6 +325,9 @@ export default function App() {
     
     setLoginError('');
     setStatusMsg('데이터 확인 중...');
+
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(inputKey), {name: "PBKDF2"}, false, ["deriveKey"]);
 
     let loadedChain = null;
     let isCloud = false;
@@ -337,11 +342,11 @@ export default function App() {
           loadedChain = snapshot.data().chain;
           isCloud = true;
         } else {
-          let savedChain = localStorage.getItem(`my_blockchain_db_v4_${user.uid}`);
+          let savedChain = sessionStorage.getItem(`my_blockchain_db_v4_${user.uid}`);
           if (savedChain) {
             loadedChain = JSON.parse(savedChain);
           } else {
-            savedChain = localStorage.getItem('my_blockchain_db_v4_local');
+            savedChain = sessionStorage.getItem('my_blockchain_db_v4_local');
             if (savedChain) {
               loadedChain = JSON.parse(savedChain);
               migratedFromLocal = true;
@@ -349,19 +354,19 @@ export default function App() {
           }
         }
       } catch (err) {
-        let savedChain = localStorage.getItem(`my_blockchain_db_v4_${user.uid}`);
-        if (!savedChain) savedChain = localStorage.getItem('my_blockchain_db_v4_local');
+        let savedChain = sessionStorage.getItem(`my_blockchain_db_v4_${user.uid}`);
+        if (!savedChain) savedChain = sessionStorage.getItem('my_blockchain_db_v4_local');
         if (savedChain) loadedChain = JSON.parse(savedChain);
       }
     } else {
-      const savedChain = localStorage.getItem('my_blockchain_db_v4_local');
+      const savedChain = sessionStorage.getItem('my_blockchain_db_v4_local');
       if (savedChain) loadedChain = JSON.parse(savedChain);
     }
 
     // 키 검증 로직 (데이터가 있을 경우)
     if (loadedChain && loadedChain.length > 1) {
       // 두 번째 블록(첫 번째 실제 데이터) 복호화 시도
-      const testDecrypt = await decryptData(loadedChain[1].data, masterKey);
+      const testDecrypt = await decryptData(loadedChain[1].data, keyMaterial);
       if (!testDecrypt) {
         const newFails = failedAttempts + 1;
         setFailedAttempts(newFails);
@@ -378,15 +383,17 @@ export default function App() {
 
     // 성공 처리
     setFailedAttempts(0);
+    setCryptoKey(keyMaterial);
+    setInputKey('');
     setIsUnlocked(true);
 
     if (loadedChain) {
       setChain(loadedChain);
       const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
-      localStorage.setItem(storageKey, JSON.stringify(loadedChain));
+      sessionStorage.setItem(storageKey, JSON.stringify(loadedChain));
       
       if (migratedFromLocal) {
-        localStorage.removeItem('my_blockchain_db_v4_local');
+        sessionStorage.removeItem('my_blockchain_db_v4_local');
       }
 
       if (user && db && !isCloud) {
@@ -413,7 +420,7 @@ export default function App() {
     const id = editingId || generateId();
     const action = editingId ? 'UPDATE' : 'CREATE';
     const rawData = JSON.stringify({ id, action, site, username, password });
-    const encryptedData = await encryptData(rawData, masterKey);
+    const encryptedData = await encryptData(rawData, cryptoKey);
 
     const prevBlock = chain[chain.length - 1];
     const index = prevBlock.index + 1;
@@ -438,7 +445,7 @@ export default function App() {
     setStatusMsg('삭제 블록 생성 중...');
 
     const rawData = JSON.stringify({ id: item.id, action: 'DELETE', site: item.site, username: item.username, password: '' });
-    const encryptedData = await encryptData(rawData, masterKey);
+    const encryptedData = await encryptData(rawData, cryptoKey);
 
     const prevBlock = chain[chain.length - 1];
     const index = prevBlock.index + 1;
@@ -461,7 +468,8 @@ export default function App() {
       setImportData(null);
       
       setIsUnlocked(false);
-      setMasterKey('');
+      setCryptoKey(null);
+      setInputKey('');
       setHasExistingChain(true);
       setLoginError('복원된 데이터를 클라우드에 업로드했습니다. 올바른 마스터 키로 다시 로그인해주세요.');
     }
@@ -548,19 +556,22 @@ export default function App() {
     e.target.value = null;
   };
 
+  const clipboardTimeoutRef = useRef(null);
+
   const handleCopy = (text, label) => {
-    const textArea = document.createElement("textarea");
-    textArea.value = text;
-    document.body.appendChild(textArea);
-    textArea.select();
-    try {
-      document.execCommand('copy');
-      setStatusMsg(`${label} 복사 완료!`);
-    } catch (err) {
+    navigator.clipboard.writeText(text).then(() => {
+      setStatusMsg(`${label} 복사 완료! (30초 후 자동 삭제)`);
+      if (clipboardTimeoutRef.current) {
+        clearTimeout(clipboardTimeoutRef.current);
+      }
+      clipboardTimeoutRef.current = setTimeout(() => {
+        navigator.clipboard.writeText('');
+        setStatusMsg('');
+      }, 30000);
+    }).catch(() => {
       setStatusMsg('복사 실패');
-    }
-    document.body.removeChild(textArea);
-    setTimeout(() => setStatusMsg(''), 2000);
+      setTimeout(() => setStatusMsg(''), 2000);
+    });
   };
 
   const generateRandomPassword = () => {
@@ -666,8 +677,8 @@ export default function App() {
               type="password"
               className="w-full bg-slate-50 border border-slate-200 text-slate-900 px-4 py-3.5 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-center text-lg tracking-widest disabled:opacity-50 disabled:cursor-not-allowed"
               placeholder="마스터 키 입력"
-              value={masterKey}
-              onChange={(e) => setMasterKey(e.target.value)}
+              value={inputKey}
+              onChange={(e) => setInputKey(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleUnlock()}
               disabled={!isAuthReady || lockoutUntil > 0}
             />
