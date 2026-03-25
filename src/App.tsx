@@ -108,12 +108,30 @@ export default function App() {
     }
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
-      setIsAuthReady(true);
-      if (!u) {
+      if (u) {
+        const checkData = async () => {
+          let exists = false;
+          if (db) {
+            try {
+              const docRef = doc(db, 'artifacts', appId, 'users', u.uid, 'vault_data', 'chain_doc');
+              const snapshot = await getDoc(docRef);
+              if (snapshot.exists()) exists = true;
+            } catch (e) {}
+          }
+          if (!exists) {
+            if (localStorage.getItem(`my_blockchain_db_v4_${u.uid}`)) exists = true;
+            else if (localStorage.getItem('my_blockchain_db_v4_local')) exists = true;
+          }
+          setHasExistingChain(exists);
+          setIsAuthReady(true);
+        };
+        checkData();
+      } else {
         setIsUnlocked(false);
         setMasterKey('');
         setChain([]);
-        setHasExistingChain(false);
+        setHasExistingChain(!!localStorage.getItem('my_blockchain_db_v4_local'));
+        setIsAuthReady(true);
       }
     });
     return () => unsubscribe();
@@ -140,10 +158,13 @@ export default function App() {
     }
   };
 
-  // [로컬 확인] 초기 진입 시 로컬 데이터 존재 유무 확인
+  // [로컬 확인] 초기 진입 시 기존 데이터 마이그레이션
   useEffect(() => {
-    const savedChain = localStorage.getItem('my_blockchain_db_v4');
-    if (savedChain) setHasExistingChain(true);
+    const oldData = localStorage.getItem('my_blockchain_db_v4');
+    if (oldData) {
+      localStorage.setItem('my_blockchain_db_v4_local', oldData);
+      localStorage.removeItem('my_blockchain_db_v4');
+    }
   }, []);
 
   // [보안 복호화] 체인이 갱신될 때마다 화면용 데이터 복호화
@@ -174,7 +195,8 @@ export default function App() {
            const cloudChain = snapshot.data().chain;
            if (JSON.stringify(chain) !== JSON.stringify(cloudChain)) {
                setChain(cloudChain);
-               localStorage.setItem('my_blockchain_db_v4', JSON.stringify(cloudChain));
+               const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
+               localStorage.setItem(storageKey, JSON.stringify(cloudChain));
            }
        }
     }, (err) => console.error("Cloud Sync Error:", err));
@@ -230,7 +252,8 @@ export default function App() {
   // --- [코어 로직] 상태 및 클라우드 업데이트 공통 함수 ---
   const updateChainAndCloud = async (newChain) => {
     setChain(newChain);
-    localStorage.setItem('my_blockchain_db_v4', JSON.stringify(newChain));
+    const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
+    localStorage.setItem(storageKey, JSON.stringify(newChain));
     
     if (user && db) {
       try {
@@ -268,6 +291,7 @@ export default function App() {
 
     let loadedChain = null;
     let isCloud = false;
+    let migratedFromLocal = false;
 
     if (user && db) {
       try {
@@ -278,15 +302,24 @@ export default function App() {
           loadedChain = snapshot.data().chain;
           isCloud = true;
         } else {
-          const savedChain = localStorage.getItem('my_blockchain_db_v4');
-          if (savedChain) loadedChain = JSON.parse(savedChain);
+          let savedChain = localStorage.getItem(`my_blockchain_db_v4_${user.uid}`);
+          if (savedChain) {
+            loadedChain = JSON.parse(savedChain);
+          } else {
+            savedChain = localStorage.getItem('my_blockchain_db_v4_local');
+            if (savedChain) {
+              loadedChain = JSON.parse(savedChain);
+              migratedFromLocal = true;
+            }
+          }
         }
       } catch (err) {
-        const savedChain = localStorage.getItem('my_blockchain_db_v4');
+        let savedChain = localStorage.getItem(`my_blockchain_db_v4_${user.uid}`);
+        if (!savedChain) savedChain = localStorage.getItem('my_blockchain_db_v4_local');
         if (savedChain) loadedChain = JSON.parse(savedChain);
       }
     } else {
-      const savedChain = localStorage.getItem('my_blockchain_db_v4');
+      const savedChain = localStorage.getItem('my_blockchain_db_v4_local');
       if (savedChain) loadedChain = JSON.parse(savedChain);
     }
 
@@ -314,7 +347,13 @@ export default function App() {
 
     if (loadedChain) {
       setChain(loadedChain);
-      localStorage.setItem('my_blockchain_db_v4', JSON.stringify(loadedChain));
+      const storageKey = user ? `my_blockchain_db_v4_${user.uid}` : 'my_blockchain_db_v4_local';
+      localStorage.setItem(storageKey, JSON.stringify(loadedChain));
+      
+      if (migratedFromLocal) {
+        localStorage.removeItem('my_blockchain_db_v4_local');
+      }
+
       if (user && db && !isCloud) {
         const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'vault_data', 'chain_doc');
         await setDoc(docRef, { chain: loadedChain });
